@@ -358,19 +358,18 @@ def compute_slice(lattice_type, size_x, size_y, cell_size_mm, wall_mm, res_xy=30
 
 
 @st.cache_data
-def estimate_fill_ratio(lattice_type, size_x, size_y, size_z, cell_size_mm, wall_mm, res=60):
-    """Быстрая оценка коэффициента заполнения через выборку поля."""
+def estimate_fill_ratio(lattice_type, size_x, size_y, size_z, cell_size_mm, wall_mm, res=40):
+    """Быстрая оценка коэффициента заполнения через выборку поля с broadcasting (низкое потребление RAM)."""
     cells_x = size_x / cell_size_mm
     cells_y = size_y / cell_size_mm
     cells_z = size_z / cell_size_mm
     
-    x = np.linspace(0, 2*np.pi*cells_x, res, endpoint=False)
-    y = np.linspace(0, 2*np.pi*cells_y, res, endpoint=False)
-    z = np.linspace(0, 2*np.pi*cells_z, res, endpoint=False)
-    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+    xb = np.linspace(0, 2*np.pi*cells_x, res, endpoint=False, dtype=np.float32)[:, None, None]
+    yb = np.linspace(0, 2*np.pi*cells_y, res, endpoint=False, dtype=np.float32)[None, :, None]
+    zb = np.linspace(0, 2*np.pi*cells_z, res, endpoint=False, dtype=np.float32)[None, None, :]
     
     surf = LATTICE_SURFACES.get(lattice_type, LATTICE_SURFACES["gyroid"])
-    F = surf["func"](X, Y, Z)
+    F = surf["func"](xb, yb, zb)
     t, _ = compute_t_and_mean_grad(lattice_type, cell_size_mm, wall_mm)
     fill = float(np.mean(np.abs(F) < t))
     return fill
@@ -401,38 +400,34 @@ def filter_isolated_fragments(vol, min_ratio=0.01):
 @st.cache_data
 def compute_preview_3d(lattice_type, size_x, size_y, size_z, cell_size_mm, wall_mm,
                        boundary_mode="open", model_type="solid", clean_islands=True):
-    """Быстрый 3D-превью при фиксированном низком разрешении."""
+    """Быстрый 3D-превью с низким потреблением RAM для плавного рендеринга."""
     cells_x = size_x / cell_size_mm
     cells_y = size_y / cell_size_mm
     cells_z = size_z / cell_size_mm
     
     max_cells = max(cells_x, cells_y, cells_z)
-    preview_res = max(10, min(30, int(90 / max_cells)))
+    preview_res = max(8, min(24, int(60 / max_cells)))
     
-    Nx = int(round(preview_res * cells_x))
-    Ny = int(round(preview_res * cells_y))
-    Nz = int(round(preview_res * cells_z))
+    Nx = max(8, int(round(preview_res * cells_x)))
+    Ny = max(8, int(round(preview_res * cells_y)))
+    Nz = max(8, int(round(preview_res * cells_z)))
     
-    Nx = max(8, Nx)
-    Ny = max(8, Ny)
-    Nz = max(8, Nz)
+    xb = np.linspace(0, 2 * np.pi * cells_x, Nx, endpoint=False, dtype=np.float32)[:, None, None]
+    yb = np.linspace(0, 2 * np.pi * cells_y, Ny, endpoint=False, dtype=np.float32)[None, :, None]
+    zb = np.linspace(0, 2 * np.pi * cells_z, Nz, endpoint=False, dtype=np.float32)[None, None, :]
     
-    x = np.linspace(0, 2 * np.pi * cells_x, Nx, endpoint=False)
-    y = np.linspace(0, 2 * np.pi * cells_y, Ny, endpoint=False)
-    z = np.linspace(0, 2 * np.pi * cells_z, Nz, endpoint=False)
-    
-    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
     surf = LATTICE_SURFACES.get(lattice_type, LATTICE_SURFACES["gyroid"])
-    F = surf["func"](X, Y, Z)
+    F = surf["func"](xb, yb, zb)
     
     t, _ = compute_t_and_mean_grad(lattice_type, cell_size_mm, wall_mm)
-    vol = t - np.abs(F)
+    vol = t - np.abs(F, out=F)
+    del xb, yb, zb, F
     
     vol = np.pad(
         vol,
         pad_width=1,
         mode="constant",
-        constant_values=-4.0,
+        constant_values=-10.0,
     )
     if clean_islands:
         vol = filter_isolated_fragments(vol)
@@ -458,8 +453,7 @@ def compute_preview_3d(lattice_type, size_x, size_y, size_z, cell_size_mm, wall_
 def generate_lattice_stl(lattice_type, size_x, size_y, size_z, cell_size_mm, wall_mm, resolution,
                          boundary_mode="open", model_type="solid", clean_islands=True):
     """
-    Генерирует высокоточный STL замкнутой тонкостенной TPMS структуры.
-    Возвращает (stl_path, resolution, num_faces, t, relative_density, is_watertight, extents, stl_filename).
+    Генерирует высокоточный STL с ультра-низким потреблением RAM (оптимизировано под Streamlit Cloud 1GB).
     """
     cells_x = size_x / cell_size_mm
     cells_y = size_y / cell_size_mm
@@ -469,18 +463,26 @@ def generate_lattice_stl(lattice_type, size_x, size_y, size_z, cell_size_mm, wal
     Ny = int(round(resolution * cells_y))
     Nz = int(round(resolution * cells_z))
 
-    x = np.linspace(0, 2 * np.pi * cells_x, Nx, endpoint=False)
-    y = np.linspace(0, 2 * np.pi * cells_y, Ny, endpoint=False)
-    z = np.linspace(0, 2 * np.pi * cells_z, Nz, endpoint=False)
+    # Защита от OOM на облачном сервере (лимит RAM: 1 ГБ)
+    total_voxels = Nx * Ny * Nz
+    MAX_VOXELS = 8_000_000  # гарантирует RAM < 350 MB
+    if total_voxels > MAX_VOXELS:
+        scale_factor = (MAX_VOXELS / total_voxels) ** (1.0 / 3.0)
+        Nx = max(8, int(Nx * scale_factor))
+        Ny = max(8, int(Ny * scale_factor))
+        Nz = max(8, int(Nz * scale_factor))
 
-    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+    # Broadcasting float32: 0 МБ на координатную сетку
+    xb = np.linspace(0, 2 * np.pi * cells_x, Nx, endpoint=False, dtype=np.float32)[:, None, None]
+    yb = np.linspace(0, 2 * np.pi * cells_y, Ny, endpoint=False, dtype=np.float32)[None, :, None]
+    zb = np.linspace(0, 2 * np.pi * cells_z, Nz, endpoint=False, dtype=np.float32)[None, None, :]
 
     surf = LATTICE_SURFACES.get(lattice_type, LATTICE_SURFACES["gyroid"])
-    F = surf["func"](X, Y, Z)
+    F = surf["func"](xb, yb, zb)
     t, mean_grad = compute_t_and_mean_grad(lattice_type, cell_size_mm, wall_mm)
 
-    vol = t - np.abs(F)
-    del F, X, Y, Z
+    vol = t - np.abs(F, out=F)
+    del xb, yb, zb, F
 
     relative_density = float(np.mean(vol >= 0))
 
@@ -488,7 +490,7 @@ def generate_lattice_stl(lattice_type, size_x, size_y, size_z, cell_size_mm, wal
         vol,
         pad_width=1,
         mode="constant",
-        constant_values=-4.0,
+        constant_values=-10.0,
     )
     if clean_islands:
         vol = filter_isolated_fragments(vol)
@@ -675,7 +677,7 @@ with col_params:
     ro_v   = compact_input(t("ro_label"),    0.01,   20.0,  1.15, 0.01, "ro",   t("ro_help"))
 
     st.markdown(f'<div class="section-header">🎛️  {t("res_label")}</div><div style="height: 12px;"></div>', unsafe_allow_html=True)
-    resolution = compact_input(t("res_label"), 10, 300, 160, 5, "resolution", t("res_help"))
+    resolution = compact_input(t("res_label"), 10, 200, 80, 5, "resolution", t("res_help"))
     clean_islands = st.checkbox(t("clean_islands_label"), value=True, help=t("clean_islands_help"))
 
     # --- Валидация ---
