@@ -1,0 +1,695 @@
+import os
+import tempfile
+import streamlit as st
+import numpy as np
+import plotly.graph_objects as go
+import io
+import math
+import trimesh
+import trimesh.repair
+from skimage import measure
+
+
+# 1. Настройка страницы
+st.set_page_config(
+    page_title="IPMech Gyroid Tool",
+    layout="wide"
+)
+
+# --- СИСТЕМА ЛОКАЛИЗАЦИИ (RU / EN) ---
+TRANSLATIONS = {
+    "cell_params":    {"ru": "⚙️ Параметры ячейки",  "en": "⚙️ Cell Parameters"},
+    "model_params":   {"ru": "📦 Параметры модели",   "en": "📦 Model Parameters"},
+    "cell_size_label":{"ru": "Период ячейки, мм",     "en": "Cell period, mm"},
+    "cell_size_help": {"ru": "Длина одного периода гироидной ячейки (мм). Меньше = более частая решётка",
+                       "en": "One gyroid cell period length (mm). Smaller = finer lattice"},
+    "wall_label":     {"ru": "Толщина стенки, мм",    "en": "Wall thickness, mm"},
+    "wall_help":      {"ru": "Целевая толщина стенок гироидной структуры (мм, эмпирически через порог)",
+                       "en": "Target wall thickness of gyroid structure (mm, empirical via threshold)"},
+    "size_x_label":   {"ru": "Размер X, мм",           "en": "Size X, mm"},
+    "size_y_label":   {"ru": "Размер Y, мм",           "en": "Size Y, mm"},
+    "size_z_label":   {"ru": "Размер Z, мм",           "en": "Size Z, mm"},
+    "size_x_help":    {"ru": "Размер блока по оси X (мм)", "en": "Block size along X axis (mm)"},
+    "size_y_help":    {"ru": "Размер блока по оси Y (мм)", "en": "Block size along Y axis (mm)"},
+    "size_z_help":    {"ru": "Размер блока по оси Z (мм)", "en": "Block size along Z axis (mm)"},
+    "res_label":      {"ru": "Разрешение, вок/яч",     "en": "Resolution, vox/cell"},
+    "res_help":       {"ru": "Число вокселей на одну гироидную ячейку. Больше = точнее, но медленнее",
+                       "en": "Number of voxels per gyroid unit cell. Higher = finer mesh, slower"},
+    "ro_label":       {"ru": "Плотность Ro, г/см³",    "en": "Density Ro, g/cm³"},
+    "ro_help":        {"ru": "Физическая плотность материала (г/см³)",
+                       "en": "Material density (g/cm³)"},
+    "btn_generate":   {"ru": "🛠️ Подготовить STL",    "en": "🛠️ Generate STL"},
+    "btn_download":   {"ru": "📥 Скачать STL",         "en": "📥 Download STL"},
+    "generating":     {"ru": "Генерация STL...",        "en": "Generating STL..."},
+    "structure":      {"ru": "📈 Структура",            "en": "📈 Structure"},
+    "tab_3d":         {"ru": "3D Просмотр",             "en": "3D Preview"},
+    "tab_slice":      {"ru": "Срез XY",                 "en": "XY Slice"},
+    "3d_stale":       {"ru": "⚠️ Параметры были изменены. Нажмите '🛠️ Подготовить STL' для обновления 3D модели.",
+                       "en": "⚠️ Parameters changed. Click '🛠️ Generate STL' to update the 3D model."},
+    "3d_empty":       {"ru": "Сгенерируйте STL (кнопка слева), чтобы увидеть 3D превью.",
+                       "en": "Generate STL (button on the left) to see 3D preview."},
+    "metrics":        {"ru": "📊 Характеристики",      "en": "📊 Metrics"},
+    "m_size_x":       {"ru": "Размер X",                "en": "Size X"},
+    "m_size_y":       {"ru": "Размер Y",                "en": "Size Y"},
+    "m_size_z":       {"ru": "Размер Z",                "en": "Size Z"},
+    "m_cell":         {"ru": "Период ячейки",           "en": "Cell period"},
+    "m_wall":         {"ru": "Толщина стенки",          "en": "Wall thickness"},
+    "m_cells_x":      {"ru": "Ячеек X",                 "en": "Cells X"},
+    "m_cells_y":      {"ru": "Ячеек Y",                 "en": "Cells Y"},
+    "m_cells_z":      {"ru": "Ячеек Z",                 "en": "Cells Z"},
+    "m_volume_full":  {"ru": "V полный",                "en": "V full"},
+    "m_volume_mat":   {"ru": "V материала",             "en": "V material"},
+    "m_fill":         {"ru": "Заполнение",              "en": "Fill ratio"},
+    "m_mass":         {"ru": "Масса",                   "en": "Mass"},
+    "m_threshold":    {"ru": "Порог t",                 "en": "Threshold t"},
+    "m_ro_mat":       {"ru": "Плотность Ro",            "en": "Density Ro"},
+    "mm":             {"ru": " мм",   "en": " mm"},
+    "mm2":            {"ru": " мм²",  "en": " mm²"},
+    "mm3":            {"ru": " мм³",  "en": " mm³"},
+    "g":              {"ru": " г",    "en": " g"},
+    "gcm3":           {"ru": " г/см³","en": " g/cm³"},
+    "boundary_label":  {"ru": "🚪 Режим границ",       "en": "🚪 Boundary Mode"},
+    "boundary_help":   {"ru": "Открытые поры для 3D-печати или закрытый глухой блок",
+                        "en": "Open pores for 3D printing or closed solid block"},
+    "boundary_open":   {"ru": "Открытые поры (оболочка)", "en": "Open pores (sheet)"},
+    "boundary_closed": {"ru": "Закрытые грани (блок)", "en": "Closed faces (block)"},
+    "model_type_label": {"ru": "📐 Тип геометрии",       "en": "📐 Geometry Type"},
+    "model_type_help":  {"ru": "Стенка заданной толщины или бесконечно тонкая поверхность для печати в режиме Surface",
+                         "en": "Wall with target thickness or zero-thickness sheet for Surface mode printing"},
+    "type_solid":       {"ru": "Стенка (с толщиной)",   "en": "Solid Wall"},
+    "type_sheet":       {"ru": "Поверхность (нулевая толщина)", "en": "Zero-thickness Sheet"},
+}
+
+# Инициализация языка
+if 'lang_toggle' in st.session_state:
+    st.session_state['lang'] = 'en' if st.session_state['lang_toggle'] else 'ru'
+elif 'lang' not in st.session_state:
+    st.session_state['lang'] = 'ru'
+
+def t(key):
+    entry = TRANSLATIONS.get(key)
+    if entry is None:
+        return key
+    return entry.get(st.session_state['lang'], entry.get('ru', key))
+
+# --- CSS (тот же стиль, что в auxetic app) ---
+st.markdown("""
+    <style>
+           .block-container {
+               padding-top: 0.5rem !important;
+               padding-bottom: 0.5rem !important;
+               padding-left: 1.5rem !important;
+               padding-right: 1.5rem !important;
+           }
+           header { visibility: hidden; }
+           div[data-testid="stVerticalBlock"] { gap: 0.35rem !important; }
+           div[data-testid="stHorizontalBlock"] { gap: 0.4rem !important; }
+           div[data-testid="stElementContainer"] { margin-bottom: 0px !important; }
+           .stTabs [data-baseweb="tab-list"] { gap: 8px !important; }
+           .stTabs [data-baseweb="tab"] {
+               padding-top: 4px !important;
+               padding-bottom: 4px !important;
+               font-size: 0.85rem !important;
+           }
+              div[data-testid="stNumberInputContainer"],
+              [data-testid="stNumberInput"] > div {
+                  height: 28px !important;
+                  min-height: 28px !important;
+                  max-height: 28px !important;
+                  display: flex !important;
+                  align-items: center !important;
+              }
+              div[data-baseweb="base-input"],
+              div[data-baseweb="input"],
+              div[data-testid="stNumberInputContainer"] div[data-baseweb="input"] {
+                  height: 28px !important;
+                  min-height: 28px !important;
+                  max-height: 28px !important;
+                  align-items: center !important;
+              }
+              div[data-testid="stNumberInputContainer"] input,
+              .stNumberInput input {
+                  margin: 0 !important;
+                  height: 28px !important;
+                  min-height: 28px !important;
+                  max-height: 28px !important;
+                  padding-top: 0px !important;
+                  padding-bottom: 0px !important;
+                  font-size: 0.85rem !important;
+                  align-self: center !important;
+              }
+              div[data-testid="stNumberInputContainer"] button,
+              .stNumberInput button,
+              [data-testid="stNumberInput"] button {
+                  margin: 0 !important;
+                  border: none !important;
+                  height: 28px !important;
+                  min-height: 28px !important;
+                  max-height: 28px !important;
+                  width: 28px !important;
+                  padding: 0px !important;
+                  align-self: center !important;
+                  display: flex !important;
+                  align-items: center !important;
+                  justify-content: center !important;
+              }
+             .section-header {
+                 margin-top: 8px !important;
+                 margin-bottom: 0px !important;
+                 font-size: 0.9rem !important;
+                 font-weight: bold;
+                 color: #5c88be;
+                 border-bottom: 1px solid #464b5d;
+                 padding-bottom: 5px;
+             }
+           .label-col { font-size: 0.85rem; color: #9ea4b0; padding-top: 4px; }
+           .metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+           .metric-box {
+               background-color: #1e2129;
+               border: 1px solid #3d4455;
+               padding: 4px 2px;
+               border-radius: 4px;
+               text-align: center;
+               min-height: 52px;
+               display: flex;
+               flex-direction: column;
+               justify-content: center;
+           }
+           .m-label { color: #9ea4b0; font-size: 0.62rem; text-transform: uppercase; line-height: 1.1; margin-bottom: 2px; }
+           .m-value { color: #ffffff; font-size: 0.85rem; font-weight: bold; font-family: 'Consolas', monospace; }
+           .m-unit { font-size: 0.6rem; color: #5c88be; margin-left: 1px; }
+            div[data-testid="stCheckbox"], div[data-testid="stToggle"] {
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                margin-top: 0px !important;
+                height: 28px !important;
+            }
+            .lang-label-ru { font-size: 0.85rem; font-weight: bold; height: 28px; display: flex; align-items: center; justify-content: flex-end; }
+            .lang-label-en { font-size: 0.85rem; font-weight: bold; height: 28px; display: flex; align-items: center; justify-content: flex-start; }
+           .column-footer { text-align: center; color: #808495; padding-top: 10px; font-size: 0.75rem; border-top: 1px solid #464b5d; margin-top: 10px; }
+           .stButton > button { margin-bottom: -10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+# --- МАТЕМАТИКА ГИРОИДА ---
+
+def gyroid(X, Y, Z):
+    return (
+        np.sin(X) * np.cos(Y)
+        + np.sin(Y) * np.cos(Z)
+        + np.sin(Z) * np.cos(X)
+    )
+
+def gyroid_gradient_magnitude(X, Y, Z):
+    dFx = np.cos(X)*np.cos(Y) - np.sin(Z)*np.sin(X)
+    dFy = -np.sin(X)*np.sin(Y) + np.cos(Y)*np.cos(Z)
+    dFz = -np.sin(Y)*np.sin(Z) + np.cos(Z)*np.cos(X)
+    return np.sqrt(dFx*dFx + dFy*dFy + dFz*dFz)
+
+@st.cache_data
+def compute_t_and_mean_grad(cell_size, wall_thickness):
+    # Используем одну ячейку с разрешением 40 для экономии памяти
+    n = 40
+    x = np.linspace(0, 2*np.pi, n, endpoint=False)
+    X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
+    F = gyroid(X, Y, Z)
+    G = gyroid_gradient_magnitude(X, Y, Z)
+    near_surface = np.abs(F) < 0.05
+    mean_grad = float(np.mean(G[near_surface]))
+    t = wall_thickness * np.pi * mean_grad / cell_size
+    return t, mean_grad
+
+@st.cache_data
+def compute_slice(size_x, size_y, cell_size_mm, wall_mm, res_xy=300):
+    """Вычисляет 2D-срез гироидного поля по плоскости z = size_z/2."""
+    lin_x = np.linspace(0.0, size_x, res_xy)
+    lin_y = np.linspace(0.0, size_y, res_xy)
+    
+    # В угловых координатах
+    cells_x = size_x / cell_size_mm
+    cells_y = size_y / cell_size_mm
+    
+    x_ang = np.linspace(0, 2*np.pi*cells_x, res_xy)
+    y_ang = np.linspace(0, 2*np.pi*cells_y, res_xy)
+    X_ang, Y_ang = np.meshgrid(x_ang, y_ang, indexing="xy")
+    Z_ang = np.zeros_like(X_ang)
+    
+    field = gyroid(X_ang, Y_ang, Z_ang)
+    t, _ = compute_t_and_mean_grad(cell_size_mm, wall_mm)
+    
+    # маска: 1 = стенка, 0 = пустота
+    mask = (np.abs(field) < t).astype(float)
+    return lin_x, lin_y, mask
+
+@st.cache_data
+def estimate_fill_ratio(size_x, size_y, size_z, cell_size_mm, wall_mm, res=60):
+    """Быстрая оценка заполнения через случайную выборку поля."""
+    cells_x = size_x / cell_size_mm
+    cells_y = size_y / cell_size_mm
+    cells_z = size_z / cell_size_mm
+    
+    x = np.linspace(0, 2*np.pi*cells_x, res, endpoint=False)
+    y = np.linspace(0, 2*np.pi*cells_y, res, endpoint=False)
+    z = np.linspace(0, 2*np.pi*cells_z, res, endpoint=False)
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+    
+    F = gyroid(X, Y, Z)
+    t, _ = compute_t_and_mean_grad(cell_size_mm, wall_mm)
+    fill = float(np.mean(np.abs(F) < t))
+    return fill
+
+@st.cache_data
+def compute_preview_3d(size_x, size_y, size_z, cell_size_mm, wall_mm, boundary_mode="open", model_type="solid"):
+    """
+    Быстрый 3D-превью гироида при фиксированном низком разрешении.
+    Использует новую логику sheet-Gyroid с padding.
+    """
+    cells_x = size_x / cell_size_mm
+    cells_y = size_y / cell_size_mm
+    cells_z = size_z / cell_size_mm
+    
+    max_cells = max(cells_x, cells_y, cells_z)
+    # Динамически выбираем разрешение на ячейку, чтобы размер сетки по длинной оси был около 80-100 точек
+    preview_res = max(10, min(30, int(90 / max_cells)))
+    
+    Nx = int(round(preview_res * cells_x))
+    Ny = int(round(preview_res * cells_y))
+    Nz = int(round(preview_res * cells_z))
+    
+    Nx = max(8, Nx)
+    Ny = max(8, Ny)
+    Nz = max(8, Nz)
+    
+    x = np.linspace(0, 2 * np.pi * cells_x, Nx, endpoint=False)
+    y = np.linspace(0, 2 * np.pi * cells_y, Ny, endpoint=False)
+    z = np.linspace(0, 2 * np.pi * cells_z, Nz, endpoint=False)
+    
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+    F = gyroid(X, Y, Z)
+    
+    t, _ = compute_t_and_mean_grad(cell_size_mm, wall_mm)
+    vol = t - np.abs(F)
+    
+    vol = np.pad(
+        vol,
+        pad_width=1,
+        mode="constant",
+        constant_values=-4.0,
+    )
+    
+    spacing = (cell_size_mm / preview_res,) * 3
+    
+    try:
+        verts, faces, normals, _ = measure.marching_cubes(
+            vol,
+            level=0.0,
+            spacing=spacing,
+            method="lewiner",
+            allow_degenerate=False,
+            step_size=1,
+        )
+        verts -= np.asarray(spacing)
+        return verts, faces, normals
+    except Exception:
+        return None
+
+
+@st.cache_data
+def generate_gyroid_stl(size_x, size_y, size_z, cell_size_mm, wall_mm, resolution, boundary_mode="open", model_type="solid"):
+    """
+    Генерирует STL замкнутой тонкостенной структуры sheet Gyroid.
+    Возвращает (stl_path, resolution, num_faces, t, relative_density, is_watertight, extents).
+    """
+    # 1. Вычисляем количество ячеек (cells) по осям
+    cells_x = size_x / cell_size_mm
+    cells_y = size_y / cell_size_mm
+    cells_z = size_z / cell_size_mm
+
+    # 2. Вычисляем разрешение в вокселях по каждой оси (Nx, Ny, Nz)
+    # Здесь resolution — это вокселей на одну ячейку (cell)
+    Nx = int(round(resolution * cells_x))
+    Ny = int(round(resolution * cells_y))
+    Nz = int(round(resolution * cells_z))
+
+    # 3. Строим сетку угловых координат, нормированную к периодам 2*pi
+    x = np.linspace(0, 2 * np.pi * cells_x, Nx, endpoint=False)
+    y = np.linspace(0, 2 * np.pi * cells_y, Ny, endpoint=False)
+    z = np.linspace(0, 2 * np.pi * cells_z, Nz, endpoint=False)
+
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+
+    # 4. Вычисляем неявную функцию F и уровень t
+    F = gyroid(X, Y, Z)
+    t, mean_grad = compute_t_and_mean_grad(cell_size_mm, wall_mm)
+
+    # 5. Sheet-объем: vol = t - np.abs(F)
+    vol = t - np.abs(F)
+
+    # Высвобождаем память
+    del F, X, Y, Z
+
+    # Считаем относительную плотность до паддинга
+    relative_density = float(np.mean(vol >= 0))
+
+    # 6. Закрытие внешних границ через отрицательный padding
+    vol = np.pad(
+        vol,
+        pad_width=1,
+        mode="constant",
+        constant_values=-4.0,
+    )
+
+    # 7. Физический масштаб (размер одного вокселя)
+    spacing = (cell_size_mm / resolution,) * 3
+
+    # 8. Извлечение поверхности методом Lewiner Marching Cubes
+    verts, faces, normals, values = measure.marching_cubes(
+        vol,
+        level=0.0,
+        spacing=spacing,
+        method="lewiner",
+        allow_degenerate=False,
+        step_size=1,
+    )
+
+    # 9. Сдвиг вершин для компенсации сдвига от padding
+    verts -= np.asarray(spacing)
+
+    # Высвобождаем память
+    del vol
+
+    # 10. Очистка, проверка и репарация mesh через trimesh
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    mesh.merge_vertices()
+
+    mask = mesh.nondegenerate_faces()
+    mesh.update_faces(mask)
+
+    trimesh.repair.fix_winding(mesh)
+    trimesh.repair.fix_normals(mesh)
+
+    if not mesh.is_watertight:
+        trimesh.repair.fill_holes(mesh)
+        trimesh.repair.fix_normals(mesh)
+
+    # Вывод отладочной информации в консоль
+    print("t =", t)
+    print("relative density =", relative_density)
+    print("faces =", len(mesh.faces))
+    print("watertight =", mesh.is_watertight)
+    print("bounds, mm =", mesh.bounding_box.extents)
+
+    # Запись в файл
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    stl_path = os.path.join(script_dir, "temp_gyroid.stl")
+    try:
+        with open(stl_path, "ab"):
+            pass
+    except (PermissionError, OSError):
+        stl_path = os.path.join(tempfile.gettempdir(), "temp_gyroid.stl")
+    stl_bytes = trimesh.exchange.stl.export_stl(mesh)
+    with open(stl_path, "wb") as f:
+        f.write(stl_bytes)
+
+    return stl_path, resolution, len(mesh.faces), t, relative_density, mesh.is_watertight, mesh.bounding_box.extents
+
+
+
+def create_3d_plot(verts, faces):
+    """
+    Строит 3D-график из вершин/граней Marching Cubes.
+    Использует плавный Gouraud-шейдинг (flatshading=False).
+    """
+    verts = np.asarray(verts)
+    faces = np.asarray(faces)
+    x, y, z = verts[:, 0], verts[:, 1], verts[:, 2]
+    ii, jj, kk = faces[:, 0], faces[:, 1], faces[:, 2]
+    fig = go.Figure(data=[go.Mesh3d(
+        x=x, y=y, z=z,
+        i=ii, j=jj, k=kk,
+        vertexcolor=None,
+        color='#5c88be',
+        flatshading=False,
+        lighting=dict(
+            ambient=0.35,
+            diffuse=0.85,
+            roughness=0.4,
+            specular=0.6,
+            fresnel=0.3
+        ),
+        lightposition=dict(x=1, y=1, z=2),
+    )])
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            aspectmode='data',
+            bgcolor='rgba(0,0,0,0)'
+        ),
+        margin=dict(l=0, r=0, b=0, t=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        height=420
+    )
+    return fig
+
+
+def create_slice_plot(lin_x, lin_y, mask, size_x, size_y):
+    fig = go.Figure()
+    fig.add_trace(go.Heatmap(
+        x=lin_x, y=lin_y, z=mask,
+        colorscale=[[0, "rgba(20,24,36,1)"], [1, "#5c88be"]],
+        showscale=False,
+        hoverinfo='skip',
+    ))
+    # граница блока
+    bx = [0, size_x, size_x, 0, 0]
+    by = [0, 0, size_y, size_y, 0]
+    fig.add_trace(go.Scatter(x=bx, y=by, mode='lines',
+                             line=dict(color='#ff6b6b', width=1.5, dash='dash'),
+                             hoverinfo='skip'))
+    fig.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=10, b=0),
+        showlegend=False,
+        xaxis=dict(showgrid=False, zeroline=False, scaleanchor="y", scaleratio=1,
+                   title=dict(text="X, мм", font=dict(size=10, color="#9ea4b0"))),
+        yaxis=dict(showgrid=False, zeroline=False,
+                   title=dict(text="Y, мм", font=dict(size=10, color="#9ea4b0"))),
+        height=420
+    )
+    return fig
+
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ UI ---
+
+def compact_input(label, min_v, max_v, default, step, key, help_text=""):
+    c1, c2 = st.columns([1.1, 1.0])
+    tooltip_attr = f'title="{help_text}"' if help_text else ""
+    icon = " ⓘ" if help_text else ""
+    c1.markdown(f'<div class="label-col" {tooltip_attr}>{label}{icon}</div>', unsafe_allow_html=True)
+    return c2.number_input(label, min_v, max_v, default, step=step, key=key, label_visibility="collapsed")
+
+def metric_card(label, value, unit="", tooltip=""):
+    tooltip_attr = f' title="{tooltip}"' if tooltip else ''
+    return (f'<div class="metric-box"{tooltip_attr}>'
+            f'<div class="m-label">{label}</div>'
+            f'<div class="m-value">{value}<span class="m-unit">{unit}</span></div>'
+            f'</div>')
+
+
+# ============================================================
+# --- LAYOUT ---
+# ============================================================
+
+col_params, col_plot, col_metrics = st.columns([1.0, 3.0, 1.2])
+
+# ============================================================
+# --- ЛЕВАЯ КОЛОНКА (ПАРАМЕТРЫ) ---
+# ============================================================
+with col_params:
+    st.markdown(f'<div class="section-header">{t("cell_params")}</div><div style="height: 12px;"></div>',
+                unsafe_allow_html=True)
+    cell_size = compact_input(t("cell_size_label"), 1.0, 100.0, 10.0, 0.5,  "cell_size", t("cell_size_help"))
+    wall_mm = compact_input(t("wall_label"),      0.1,  20.0,  0.4, 0.05, "wall_mm",   t("wall_help"))
+
+    st.markdown(f'<div class="section-header">{t("model_params")}</div><div style="height: 12px;"></div>',
+                unsafe_allow_html=True)
+
+    size_x = compact_input(t("size_x_label"), 1.0, 5000.0, 70.0, 1.0, "size_x", t("size_x_help"))
+    size_y = compact_input(t("size_y_label"), 1.0, 5000.0, 70.0, 1.0, "size_y", t("size_y_help"))
+    size_z = compact_input(t("size_z_label"), 1.0, 5000.0, 20.0, 1.0, "size_z", t("size_z_help"))
+    ro_v   = compact_input(t("ro_label"),    0.01,   20.0,  1.15, 0.01, "ro",   t("ro_help"))
+
+    st.markdown(f'<div class="section-header">🎛️  {t("res_label")}</div><div style="height: 12px;"></div>', unsafe_allow_html=True)
+    resolution = compact_input(t("res_label"), 10, 300, 60, 5, "resolution", t("res_help"))
+
+    # --- Валидация ---
+    is_valid = True
+    err_msg = ""
+    if wall_mm >= cell_size / 2.0:
+        is_valid = False
+        err_msg = f"Толщина стенки ({wall_mm:.2f}) должна быть < cell_size/2 ({cell_size/2:.2f} мм)"
+
+    if not is_valid:
+        st.error(err_msg)
+
+    # --- Хэш параметров для детекции изменений ---
+    _param_hash = hash((cell_size, wall_mm, size_x, size_y, size_z, ro_v, resolution))
+
+    st.write("")
+
+    if st.button(t("btn_generate"), use_container_width=True, disabled=not is_valid):
+        with st.spinner(t("generating")):
+            try:
+                stl_path, eff_res, num_faces, t_val, rel_density, is_watertight, extents = generate_gyroid_stl(
+                    size_x, size_y, size_z, cell_size, wall_mm, resolution
+                )
+                st.session_state['stl_ready_path'] = stl_path
+                st.session_state['stl_param_hash'] = _param_hash
+                st.session_state['eff_res']        = eff_res
+                st.session_state['num_faces']      = num_faces
+                st.session_state['t_val']          = t_val
+                st.session_state['rel_density']    = rel_density
+                st.session_state['is_watertight']  = is_watertight
+                st.session_state['extents']        = extents
+            except Exception as e:
+                st.error(f"Ошибка генерации STL: {e}")
+
+    if 'stl_ready_path' in st.session_state:
+        with open(st.session_state['stl_ready_path'], "rb") as f:
+            st.download_button(
+                t("btn_download"),
+                f,
+                "gyroid.stl",
+                "application/sla",
+                use_container_width=True
+            )
+
+
+# ============================================================
+# --- ЦЕНТРАЛЬНАЯ КОЛОНКА (ВИЗУАЛИЗАЦИЯ) ---
+# ============================================================
+with col_plot:
+    tab_slice_ui, tab_3d_ui = st.tabs([t("tab_slice"), t("tab_3d")])
+
+    with tab_slice_ui:
+        st.markdown(f'<div class="section-header">{t("structure")} (2D Срез)</div>', unsafe_allow_html=True)
+        if is_valid:
+            lin_x, lin_y, mask = compute_slice(size_x, size_y, cell_size, wall_mm)
+            fig_slice = create_slice_plot(lin_x, lin_y, mask, size_x, size_y)
+            st.plotly_chart(fig_slice, use_container_width=True, config={'displayModeBar': False})
+
+            if st.session_state.get('stl_param_hash') == _param_hash and 'stl_ready_path' in st.session_state:
+                st.info(f"✅ STL готов (Треугольников: {st.session_state.get('num_faces', 0):,})")
+            elif 'stl_ready_path' in st.session_state:
+                st.warning(t("3d_stale"))
+        else:
+            st.info("Исправьте параметры для просмотра среза.")
+
+    with tab_3d_ui:
+        st.markdown('<div class="section-header">3D Визуализация (упрощенная модель)</div>', unsafe_allow_html=True)
+        if is_valid:
+            if st.session_state.get('stl_param_hash') == _param_hash and 'stl_ready_path' in st.session_state:
+                with st.spinner("Отрисовка 3D модели..."):
+                    preview_data = compute_preview_3d(size_x, size_y, size_z, cell_size, wall_mm)
+                    if preview_data is not None:
+                        verts_p, faces_p, _ = preview_data
+                        fig_3d = create_3d_plot(verts_p, faces_p)
+                        st.plotly_chart(fig_3d, use_container_width=True)
+                    else:
+                        st.error("Данные 3D превью недоступны.")
+            elif 'stl_ready_path' in st.session_state:
+                st.warning(t("3d_stale"))
+            else:
+                st.info(t("3d_empty"))
+        else:
+            st.info("Исправьте параметры для просмотра 3D модели.")
+
+# ============================================================
+# --- ПРАВАЯ КОЛОНКА (МЕТРИКИ) ---
+# ============================================================
+with col_metrics:
+    hdr_cols = st.columns([1.5, 2.0])
+    with hdr_cols[0]:
+        st.markdown(
+            f'<div class="section-header" style="border-bottom:none; margin:0; padding:0; line-height:2.2;">'
+            f'{t("metrics")}</div>',
+            unsafe_allow_html=True
+        )
+    with hdr_cols[1]:
+        lang_cols = st.columns([1.2, 1.0, 1.2])
+        is_en = (st.session_state.get('lang', 'ru') == 'en')
+        ru_color = "#ffffff" if not is_en else "#6f7380"
+        en_color = "#ffffff" if is_en else "#6f7380"
+        with lang_cols[0]:
+            st.markdown(f'<div class="lang-label-ru" style="color: {ru_color};">рус</div>', unsafe_allow_html=True)
+        with lang_cols[1]:
+            st.toggle("Language", value=is_en, key="lang_toggle", label_visibility="collapsed")
+        with lang_cols[2]:
+            st.markdown(f'<div class="lang-label-en" style="color: {en_color};">EN</div>', unsafe_allow_html=True)
+
+    st.markdown('<div style="border-bottom: 1px solid #464b5d; margin-top: 2px; margin-bottom: 12px;"></div>',
+                unsafe_allow_html=True)
+
+    # --- Расчёт метрик ---
+    cells_x = size_x / cell_size
+    cells_y = size_y / cell_size
+    cells_z = size_z / cell_size
+    volume_full = size_x * size_y * size_z          # мм³
+    t_val, _ = compute_t_and_mean_grad(cell_size, wall_mm)
+
+    # Оценка заполнения (быстрая, через кэш)
+    if is_valid:
+        fill_ratio = estimate_fill_ratio(size_x, size_y, size_z, cell_size, wall_mm)
+    else:
+        fill_ratio = 0.0
+
+    volume_mat = volume_full * fill_ratio            # мм³
+    mass_g = volume_mat * ro_v * 1e-3               # г (мм³ * г/см³ * 0.001)
+
+    metrics_list = [
+        metric_card(t("m_size_x"),      f"{size_x:.0f}",       t("mm")),
+        metric_card(t("m_size_y"),      f"{size_y:.0f}",       t("mm")),
+        metric_card(t("m_size_z"),      f"{size_z:.0f}",       t("mm")),
+        metric_card(t("m_cells_x"),     f"{cells_x:.1f}",      ""),
+        metric_card(t("m_cells_y"),     f"{cells_y:.1f}",      ""),
+        metric_card(t("m_cells_z"),     f"{cells_z:.1f}",      ""),
+        metric_card(t("m_volume_full"), f"{volume_full:.0f}",  t("mm3")),
+        metric_card(t("m_fill"),        f"{fill_ratio*100:.1f}", "%",
+                    "Доля объёма, занятая материалом (оценка по полю)"),
+        metric_card(t("m_mass"),        f"{mass_g:.2f}",       t("g")),
+        metric_card(t("m_cell"),        f"{cell_size:.1f}",    t("mm")),
+        metric_card(t("m_threshold"),   f"{t_val:.3f}",      "",
+                    "Порог |f| < t определяет толщину стенок. Рассчитан по градиенту."),
+        metric_card(t("m_ro_mat"),      f"{ro_v:.2f}",         t("gcm3")),
+    ]
+    st.markdown('<div class="metrics-grid">' + "".join(metrics_list) + '</div>', unsafe_allow_html=True)
+
+    # Дополнительные метрики из сгенерированного STL
+    if 'stl_ready_path' in st.session_state and st.session_state.get('stl_param_hash') == _param_hash:
+        st.markdown('<div class="section-header">📦 Свойства STL-модели</div><div style="height: 8px;"></div>', unsafe_allow_html=True)
+        
+        is_watertight = st.session_state.get('is_watertight', False)
+        extents = st.session_state.get('extents', [0.0, 0.0, 0.0])
+        rel_density = st.session_state.get('rel_density', 0.0)
+        
+        wt_str = "Да ✅" if is_watertight else "Нет ❌"
+        
+        stl_metrics = [
+            metric_card("Watertight", wt_str, "", "Герметична ли сгенерированная STL-сетка"),
+            metric_card("Относ. плотность", f"{rel_density*100:.1f}", "%", "Относительная плотность сгенерированной структуры"),
+            metric_card("BBox X", f"{extents[0]:.1f}", "мм"),
+            metric_card("BBox Y", f"{extents[1]:.1f}", "мм"),
+            metric_card("BBox Z", f"{extents[2]:.1f}", "мм"),
+        ]
+        st.markdown('<div class="metrics-grid">' + "".join(stl_metrics) + '</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="column-footer">© 2026 Demin A.I. — Laboratory of Mechanics of Novel Materials and Technologies IPMech RAS</div>',
+        unsafe_allow_html=True
+    )
