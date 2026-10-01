@@ -8,6 +8,7 @@ import math
 import trimesh
 import trimesh.repair
 from skimage import measure
+from scipy import ndimage
 
 
 # 1. Настройка страницы
@@ -35,6 +36,9 @@ TRANSLATIONS = {
     "res_label":      {"ru": "Разрешение, вок/яч",     "en": "Resolution, vox/cell"},
     "res_help":       {"ru": "Число вокселей на одну гироидную ячейку. Больше = точнее, но медленнее",
                        "en": "Number of voxels per gyroid unit cell. Higher = finer mesh, slower"},
+    "clean_islands_label":{"ru": "Удалять несвязные углы", "en": "Filter stray fragments"},
+    "clean_islands_help": {"ru": "Исключает изолированные мелкие осколки и несвязные уголки на границах блока",
+                           "en": "Excludes isolated fragments and stray corners at the block boundaries"},
     "ro_label":       {"ru": "Плотность Ro, г/см³",    "en": "Density Ro, g/cm³"},
     "ro_help":        {"ru": "Физическая плотность материала (г/см³)",
                        "en": "Material density (g/cm³)"},
@@ -260,8 +264,30 @@ def estimate_fill_ratio(size_x, size_y, size_z, cell_size_mm, wall_mm, res=60):
     fill = float(np.mean(np.abs(F) < t))
     return fill
 
+
+def filter_isolated_fragments(vol, min_ratio=0.01):
+    """
+    Удаляет мелкие несвязные осколки и уголки на границах блока,
+    оставляя только цельное тело гироидной решетки.
+    """
+    solid_mask = (vol >= 0)
+    labeled, num_features = ndimage.label(solid_mask)
+    if num_features <= 1:
+        return vol
+    counts = np.bincount(labeled.flat)
+    if len(counts) <= 1:
+        return vol
+    comp_counts = counts[1:]
+    max_count = np.max(comp_counts)
+    threshold = max_count * min_ratio
+    keep_labels = set(np.where(counts >= threshold)[0])
+    keep_labels.discard(0)
+    remove_mask = solid_mask & (~np.isin(labeled, list(keep_labels)))
+    vol[remove_mask] = -4.0
+    return vol
+
 @st.cache_data
-def compute_preview_3d(size_x, size_y, size_z, cell_size_mm, wall_mm, boundary_mode="open", model_type="solid"):
+def compute_preview_3d(size_x, size_y, size_z, cell_size_mm, wall_mm, boundary_mode="open", model_type="solid", clean_islands=True):
     """
     Быстрый 3D-превью гироида при фиксированном низком разрешении.
     Использует новую логику sheet-Gyroid с padding.
@@ -298,6 +324,10 @@ def compute_preview_3d(size_x, size_y, size_z, cell_size_mm, wall_mm, boundary_m
         mode="constant",
         constant_values=-4.0,
     )
+    if clean_islands:
+        vol = filter_isolated_fragments(vol)
+    if clean_islands:
+        vol = filter_isolated_fragments(vol)
     
     spacing = (cell_size_mm / preview_res,) * 3
     
@@ -317,7 +347,7 @@ def compute_preview_3d(size_x, size_y, size_z, cell_size_mm, wall_mm, boundary_m
 
 
 @st.cache_data
-def generate_gyroid_stl(size_x, size_y, size_z, cell_size_mm, wall_mm, resolution, boundary_mode="open", model_type="solid"):
+def generate_gyroid_stl(size_x, size_y, size_z, cell_size_mm, wall_mm, resolution, boundary_mode="open", model_type="solid", clean_islands=True):
     """
     Генерирует STL замкнутой тонкостенной структуры sheet Gyroid.
     Возвращает (stl_path, resolution, num_faces, t, relative_density, is_watertight, extents).
@@ -515,18 +545,19 @@ with col_params:
     st.markdown(f'<div class="section-header">{t("cell_params")}</div><div style="height: 12px;"></div>',
                 unsafe_allow_html=True)
     cell_size = compact_input(t("cell_size_label"), 1.0, 100.0, 10.0, 0.5,  "cell_size", t("cell_size_help"))
-    wall_mm = compact_input(t("wall_label"),      0.1,  20.0,  0.4, 0.05, "wall_mm",   t("wall_help"))
+    wall_mm = compact_input(t("wall_label"),      0.1,  20.0,  1.20, 0.05, "wall_mm",   t("wall_help"))
 
     st.markdown(f'<div class="section-header">{t("model_params")}</div><div style="height: 12px;"></div>',
                 unsafe_allow_html=True)
 
-    size_x = compact_input(t("size_x_label"), 1.0, 5000.0, 70.0, 1.0, "size_x", t("size_x_help"))
-    size_y = compact_input(t("size_y_label"), 1.0, 5000.0, 70.0, 1.0, "size_y", t("size_y_help"))
+    size_x = compact_input(t("size_x_label"), 1.0, 5000.0, 20.0, 1.0, "size_x", t("size_x_help"))
+    size_y = compact_input(t("size_y_label"), 1.0, 5000.0, 20.0, 1.0, "size_y", t("size_y_help"))
     size_z = compact_input(t("size_z_label"), 1.0, 5000.0, 20.0, 1.0, "size_z", t("size_z_help"))
     ro_v   = compact_input(t("ro_label"),    0.01,   20.0,  1.15, 0.01, "ro",   t("ro_help"))
 
     st.markdown(f'<div class="section-header">🎛️  {t("res_label")}</div><div style="height: 12px;"></div>', unsafe_allow_html=True)
-    resolution = compact_input(t("res_label"), 10, 300, 60, 5, "resolution", t("res_help"))
+    resolution = compact_input(t("res_label"), 10, 300, 160, 5, "resolution", t("res_help"))
+    clean_islands = st.checkbox(t("clean_islands_label"), value=True, help=t("clean_islands_help"))
 
     # --- Валидация ---
     is_valid = True
@@ -539,7 +570,7 @@ with col_params:
         st.error(err_msg)
 
     # --- Хэш параметров для детекции изменений ---
-    _param_hash = hash((cell_size, wall_mm, size_x, size_y, size_z, ro_v, resolution))
+    _param_hash = hash((cell_size, wall_mm, size_x, size_y, size_z, ro_v, resolution, clean_islands))
 
     st.write("")
 
@@ -547,7 +578,7 @@ with col_params:
         with st.spinner(t("generating")):
             try:
                 stl_path, eff_res, num_faces, t_val, rel_density, is_watertight, extents = generate_gyroid_stl(
-                    size_x, size_y, size_z, cell_size, wall_mm, resolution
+                    size_x, size_y, size_z, cell_size, wall_mm, resolution, clean_islands=clean_islands
                 )
                 st.session_state['stl_ready_path'] = stl_path
                 st.session_state['stl_param_hash'] = _param_hash
@@ -596,7 +627,7 @@ with col_plot:
         if is_valid:
             if st.session_state.get('stl_param_hash') == _param_hash and 'stl_ready_path' in st.session_state:
                 with st.spinner("Отрисовка 3D модели..."):
-                    preview_data = compute_preview_3d(size_x, size_y, size_z, cell_size, wall_mm)
+                    preview_data = compute_preview_3d(size_x, size_y, size_z, cell_size, wall_mm, clean_islands=clean_islands)
                     if preview_data is not None:
                         verts_p, faces_p, _ = preview_data
                         fig_3d = create_3d_plot(verts_p, faces_p)
