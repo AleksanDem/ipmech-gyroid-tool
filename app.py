@@ -93,6 +93,10 @@ def t(key):
 # --- CSS СТИЛИЗАЦИЯ ИНТЕРФЕЙСА ---
 st.markdown("""
     <style>
+           html, body, [data-testid="stAppViewContainer"], .stApp {
+               background-color: #0e1117 !important;
+               color: #e0e6ed !important;
+           }
            .block-container {
                padding-top: 0.5rem !important;
                padding-bottom: 0.5rem !important;
@@ -137,24 +141,27 @@ st.markdown("""
                align-self: center !important;
            }
            div[data-testid="stSelectbox"] {
-               height: 28px !important;
                min-height: 28px !important;
-               max-height: 28px !important;
+               height: 28px !important;
                display: flex !important;
                align-items: center !important;
            }
            div[data-baseweb="select"] {
-               height: 28px !important;
                min-height: 28px !important;
-               max-height: 28px !important;
+               height: 28px !important;
+               width: 100% !important;
            }
            div[data-baseweb="select"] > div {
-               height: 28px !important;
                min-height: 28px !important;
-               max-height: 28px !important;
+               height: 28px !important;
                padding-top: 0px !important;
                padding-bottom: 0px !important;
-               font-size: 0.85rem !important;
+               padding-left: 6px !important;
+               padding-right: 4px !important;
+               font-size: 0.82rem !important;
+               display: flex !important;
+               align-items: center !important;
+               line-height: normal !important;
            }
            .stNumberInput button {
                height: 28px !important;
@@ -264,7 +271,34 @@ def iwp_grad(X, Y, Z):
     return np.sqrt(dFx*dFx + dFy*dFy + dFz*dFz)
 
 
+
+def bcc_field(X, Y, Z):
+    """Евклидово расстояние до 4 пространственных диагоналей ОЦК (BCC) ячейки."""
+    x = (X / (2.0 * np.pi)) % 1.0 - 0.5
+    y = (Y / (2.0 * np.pi)) % 1.0 - 0.5
+    z = (Z / (2.0 * np.pi)) % 1.0 - 0.5
+    inv_sqrt3 = 1.0 / np.sqrt(3.0)
+    p2 = x*x + y*y + z*z
+    d1 = np.sqrt(np.maximum(0.0, p2 - ((x + y + z) * inv_sqrt3) ** 2))
+    d2 = np.sqrt(np.maximum(0.0, p2 - ((x + y - z) * inv_sqrt3) ** 2))
+    d3 = np.sqrt(np.maximum(0.0, p2 - ((x - y + z) * inv_sqrt3) ** 2))
+    d4 = np.sqrt(np.maximum(0.0, p2 - ((-x + y + z) * inv_sqrt3) ** 2))
+    return np.minimum(np.minimum(d1, d2), np.minimum(d3, d4))
+
+def bcc_grad(X, Y, Z):
+    return np.ones_like(X)
+
 LATTICE_SURFACES = {
+    "bcc": {
+        "func": bcc_field,
+        "grad": bcc_grad,
+        "name_ru": "BCC (Body-Centered)",
+        "name_en": "BCC (Body-Centered)",
+        "tag": "BCC",
+        "desc_ru": "Объемно-центрированная стержневая решетка со сглаженными узлами",
+        "desc_en": "Body-centered cubic strut lattice with nodal joints",
+    },
+
     "gyroid": {
         "func": gyroid_field,
         "grad": gyroid_grad,
@@ -317,7 +351,11 @@ LATTICE_KEYS = list(LATTICE_SURFACES.keys())
 
 @st.cache_data
 def compute_t_and_mean_grad(lattice_type, cell_size, wall_thickness):
-    """Калибрует пороговое значение t на основе среднего градиента поверхности."""
+    """Калибрует пороговое значение t на основе геометрии ячейки."""
+    if lattice_type == "bcc":
+        # Для BCC wall_thickness — это диаметр балки, r = d/2 в относительных координатах
+        t = (wall_thickness / 2.0) / cell_size
+        return t, 1.0
     n = 40
     x = np.linspace(0, 2*np.pi, n, endpoint=False)
     X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
@@ -618,7 +656,7 @@ def compact_input(label, min_v, max_v, default, step, key, help_text=""):
     return c2.number_input(label, min_v, max_v, default, step=step, key=key, label_visibility="collapsed")
 
 def compact_selectbox(label, options, default_index, key, format_func=None, help_text=""):
-    c1, c2 = st.columns([1.1, 1.0])
+    c1, c2 = st.columns([0.85, 1.25])
     tooltip_attr = f'title="{help_text}"' if help_text else ""
     icon = " ⓘ" if help_text else ""
     c1.markdown(f'<div class="label-col" {tooltip_attr}>{label}{icon}</div>', unsafe_allow_html=True)
@@ -659,9 +697,10 @@ with col_params:
     )
     
     # Краткое описание физики выбранной структуры
+    desc_str = LATTICE_SURFACES[lattice_type]["desc_" + st.session_state["lang"]]
     st.markdown(
-        f'<div style="font-size:0.75rem; color:#7d8597; line-height:1.2; margin-top:-2px; margin-bottom:8px;">'
-        f'{LATTICE_SURFACES[lattice_type]["desc_" + st.session_state["lang"]]}</div>',
+        f'<div style="font-size:0.73rem; color:#8e9aa8; line-height:1.25; margin-top:-2px; margin-bottom:8px; padding-left:2px;">'
+        f'{desc_str}</div>',
         unsafe_allow_html=True
     )
 

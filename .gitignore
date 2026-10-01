@@ -3,4 +3,4 @@ __pycache__/
 *.stl
 *.step
 *.stp
-.streamlit/
+.streamlit/secrets.toml
