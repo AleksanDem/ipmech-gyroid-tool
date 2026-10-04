@@ -470,7 +470,7 @@ def compute_preview_3d(lattice_type, size_x, size_y, size_z, cell_size_mm, wall_
     if clean_islands:
         vol = filter_isolated_fragments(vol)
     
-    spacing = (cell_size_mm / preview_res,) * 3
+    spacing = (size_x / Nx, size_y / Ny, size_z / Nz)
     
     try:
         verts, faces, normals, _ = measure.marching_cubes(
@@ -533,7 +533,7 @@ def generate_lattice_stl(lattice_type, size_x, size_y, size_z, cell_size_mm, wal
     if clean_islands:
         vol = filter_isolated_fragments(vol)
 
-    spacing = (cell_size_mm / resolution,) * 3
+    spacing = (size_x / Nx, size_y / Ny, size_z / Nz)
 
     verts, faces, normals, values = measure.marching_cubes(
         vol,
@@ -566,20 +566,11 @@ def generate_lattice_stl(lattice_type, size_x, size_y, size_z, cell_size_mm, wal
     print("watertight =", mesh.is_watertight)
     print("bounds, mm =", mesh.bounding_box.extents)
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     stl_filename = f"{lattice_type}_{int(size_x)}x{int(size_y)}x{int(size_z)}_c{int(cell_size_mm)}_w{wall_mm:.2f}.stl"
-    stl_path = os.path.join(script_dir, "temp_model.stl")
-    try:
-        with open(stl_path, "ab"):
-            pass
-    except (PermissionError, OSError):
-        stl_path = os.path.join(tempfile.gettempdir(), "temp_model.stl")
-
     stl_bytes = trimesh.exchange.stl.export_stl(mesh)
-    with open(stl_path, "wb") as f:
-        f.write(stl_bytes)
+    eff_res = int(round(Nx / cells_x))
 
-    return stl_path, resolution, len(mesh.faces), t, relative_density, mesh.is_watertight, mesh.bounding_box.extents, stl_filename
+    return stl_bytes, eff_res, len(mesh.faces), t, relative_density, mesh.is_watertight, mesh.bounding_box.extents, stl_filename
 
 
 def create_3d_plot(verts, faces):
@@ -737,10 +728,10 @@ with col_params:
     if st.button(t("btn_generate"), use_container_width=True, disabled=not is_valid):
         with st.spinner(t("generating")):
             try:
-                stl_path, eff_res, num_faces, t_val, rel_density, is_watertight, extents, stl_filename = generate_lattice_stl(
+                stl_bytes, eff_res, num_faces, t_val, rel_density, is_watertight, extents, stl_filename = generate_lattice_stl(
                     lattice_type, size_x, size_y, size_z, cell_size, wall_mm, resolution, clean_islands=clean_islands
                 )
-                st.session_state['stl_ready_path'] = stl_path
+                st.session_state['stl_bytes']       = stl_bytes
                 st.session_state['stl_filename']   = stl_filename
                 st.session_state['stl_param_hash'] = _param_hash
                 st.session_state['eff_res']        = eff_res
@@ -752,15 +743,14 @@ with col_params:
             except Exception as e:
                 st.error(f"Ошибка генерации STL: {e}")
 
-    if 'stl_ready_path' in st.session_state:
-        with open(st.session_state['stl_ready_path'], "rb") as f:
-            st.download_button(
-                t("btn_download"),
-                f,
-                st.session_state.get('stl_filename', "model.stl"),
-                "application/sla",
-                use_container_width=True
-            )
+    if 'stl_bytes' in st.session_state:
+        st.download_button(
+            t("btn_download"),
+            data=st.session_state['stl_bytes'],
+            file_name=st.session_state.get('stl_filename', "model.stl"),
+            mime="application/sla",
+            use_container_width=True
+        )
 
 
 # ============================================================
@@ -777,9 +767,9 @@ with col_plot:
             fig_slice = create_slice_plot(lin_x, lin_y, mask, size_x, size_y)
             st.plotly_chart(fig_slice, use_container_width=True, config={'displayModeBar': False})
 
-            if st.session_state.get('stl_param_hash') == _param_hash and 'stl_ready_path' in st.session_state:
+            if st.session_state.get('stl_param_hash') == _param_hash and 'stl_bytes' in st.session_state:
                 st.info(f"✅ STL готов (Треугольников: {st.session_state.get('num_faces', 0):,})")
-            elif 'stl_ready_path' in st.session_state:
+            elif 'stl_bytes' in st.session_state:
                 st.warning(t("3d_stale"))
         else:
             st.info("Исправьте параметры для просмотра среза.")
@@ -788,7 +778,7 @@ with col_plot:
         cur_name = LATTICE_SURFACES[lattice_type]["name_" + st.session_state["lang"]]
         st.markdown(f'<div class="section-header">3D Визуализация — {cur_name}</div>', unsafe_allow_html=True)
         if is_valid:
-            if st.session_state.get('stl_param_hash') == _param_hash and 'stl_ready_path' in st.session_state:
+            if st.session_state.get('stl_param_hash') == _param_hash and 'stl_bytes' in st.session_state:
                 with st.spinner("Отрисовка 3D модели..."):
                     preview_data = compute_preview_3d(lattice_type, size_x, size_y, size_z, cell_size, wall_mm, clean_islands=clean_islands)
                     if preview_data is not None:
@@ -797,7 +787,7 @@ with col_plot:
                         st.plotly_chart(fig_3d, use_container_width=True)
                     else:
                         st.error("Данные 3D превью недоступны.")
-            elif 'stl_ready_path' in st.session_state:
+            elif 'stl_bytes' in st.session_state:
                 st.warning(t("3d_stale"))
             else:
                 st.info(t("3d_empty"))
@@ -867,7 +857,7 @@ with col_metrics:
     st.markdown('<div class="metrics-grid">' + "".join(metrics_list) + '</div>', unsafe_allow_html=True)
 
     # Дополнительные метрики из сгенерированного STL
-    if 'stl_ready_path' in st.session_state and st.session_state.get('stl_param_hash') == _param_hash:
+    if 'stl_bytes' in st.session_state and st.session_state.get('stl_param_hash') == _param_hash:
         st.markdown('<div class="section-header">📦 Свойства STL-модели</div><div style="height: 8px;"></div>', unsafe_allow_html=True)
         
         is_watertight = st.session_state.get('is_watertight', False)
